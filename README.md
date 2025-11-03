@@ -33,7 +33,7 @@ export ANTHROPIC_API_KEY=your_api_key_here
 
 3) Run a quick smoke test (synthetic):
 ```bash
-uv run main.py --runs 3 --sequential --conv-steps 8 --source synthetic --minority-frac 0.03 --max-steps 4 --tau 0.7
+uv run main.py --runs 3 --sequential --conv-steps 8 --source synthetic --minority-frac 0.03 --max-steps 4 --tau 0.7 --model claude-haiku-4-5-20251001
 ```
 
 ## 3. Implementation
