@@ -112,6 +112,16 @@ def imbalance_start(
     sample_n: int | None = None,
 ) -> dict[str, Any]:
     global _session
+    # Idempotent: if a session already exists, return current state instead of resetting
+    if _session is not None:
+        scores = forward_scores(_session.w, _session.b, _session.X_val) if _session.w is not None else np.zeros(len(_session.y_val))
+        m = metrics_from_scores(_session.y_val, scores, _session.threshold)
+        return {
+            "train_counts": {"neg": int(np.sum(_session.y_train == 0)), "pos": int(np.sum(_session.y_train == 1))},
+            "val_baseline_f1": m["f1"],
+            "tau": _session.tau,
+            "max_steps": _session.max_steps,
+        }
     rng = np.random.default_rng(seed)
     if source == "kaggle":
         X_train, y_train, X_val, y_val, X_test, y_test = load_creditcardfraud(rng=rng, sample_n=sample_n)
@@ -149,6 +159,27 @@ def _consume_step() -> bool:
         return False
     _session.steps_used += 1
     return True
+
+
+def _auto_train(epochs: int = 10, lr: float = 0.01) -> dict[str, Any]:
+    """Always train (free) to keep model up to date after each counted action or before evaluation."""
+    assert _session is not None
+    w, b = train_logreg(
+        _session.X_train,
+        _session.y_train,
+        int(epochs),
+        float(lr),
+        _session.class_weights,
+        _session.loss_type,
+        _session.focal_alpha,
+        _session.focal_gamma,
+    )
+    _session.w = w
+    _session.b = b
+    _session.trained = True
+    scores = forward_scores(w, b, _session.X_val)
+    m = metrics_from_scores(_session.y_val, scores, _session.threshold)
+    return {"val_f1": m["f1"]}
 
 
 def smote(ratio: float = 0.2, k: int = 5, seed: int | None = None) -> dict[str, Any]:
@@ -204,7 +235,9 @@ def smote(ratio: float = 0.2, k: int = 5, seed: int | None = None) -> dict[str, 
         y_synth = np.ones(len(X_synth), dtype=int)
         _session.X_train = np.vstack([_session.X_train, X_synth])
         _session.y_train = np.concatenate([_session.y_train, y_synth])
-    return {"train_counts": {"neg": int(np.sum(_session.y_train == 0)), "pos": int(np.sum(_session.y_train == 1))}, "steps_used": _session.steps_used}
+    # Auto-train after successful SMOTE
+    auto = _auto_train()
+    return {"train_counts": {"neg": int(np.sum(_session.y_train == 0)), "pos": int(np.sum(_session.y_train == 1))}, "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
 def set_class_weights(beta: float = 0.999) -> dict[str, Any]:
@@ -213,7 +246,8 @@ def set_class_weights(beta: float = 0.999) -> dict[str, Any]:
         return {"error": "step_budget_exceeded"}
     _session.class_weights = effective_class_weights(_session.y_train, beta)
     _session.loss_type = "ce"
-    return {"class_weights": _session.class_weights.tolist(), "steps_used": _session.steps_used}
+    auto = _auto_train()
+    return {"class_weights": _session.class_weights.tolist(), "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
 def use_focal(alpha: float = 0.25, gamma: float = 2.0) -> dict[str, Any]:
@@ -223,13 +257,13 @@ def use_focal(alpha: float = 0.25, gamma: float = 2.0) -> dict[str, Any]:
     _session.loss_type = "focal"
     _session.focal_alpha = float(alpha)
     _session.focal_gamma = float(gamma)
-    return {"loss_type": _session.loss_type, "alpha": alpha, "gamma": gamma, "steps_used": _session.steps_used}
+    auto = _auto_train()
+    return {"loss_type": _session.loss_type, "alpha": alpha, "gamma": gamma, "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
 def train(epochs: int = 50, lr: float = 0.1) -> dict[str, Any]:
     assert _session is not None
-    if not _consume_step():
-        return {"error": "step_budget_exceeded"}
+    # Training is a free action and does not consume step budget
     w, b = train_logreg(
         _session.X_train,
         _session.y_train,
@@ -245,7 +279,7 @@ def train(epochs: int = 50, lr: float = 0.1) -> dict[str, Any]:
     _session.trained = True
     scores = forward_scores(w, b, _session.X_val)
     m = metrics_from_scores(_session.y_val, scores, _session.threshold)
-    return {"val_f1": m["f1"], "steps_used": _session.steps_used}
+    return {"val_f1": m["f1"], "free": True}
 
 
 def set_threshold(threshold: float) -> dict[str, Any]:
@@ -253,15 +287,21 @@ def set_threshold(threshold: float) -> dict[str, Any]:
     if not _consume_step():
         return {"error": "step_budget_exceeded"}
     _session.threshold = float(threshold)
+    # Train before evaluating threshold impact to ensure up-to-date model
+    auto = _auto_train()
     scores = forward_scores(_session.w, _session.b, _session.X_val)
     m = metrics_from_scores(_session.y_val, scores, _session.threshold)
-    return {"val_metrics": m, "threshold": _session.threshold, "steps_used": _session.steps_used}
+    return {"val_metrics": m, "threshold": _session.threshold, "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
 def eval_on_val() -> dict[str, Any]:
     assert _session is not None
+    # Ensure trained before evaluation
+    if not _session.trained:
+        _auto_train()
     scores = forward_scores(_session.w, _session.b, _session.X_val)
     m = metrics_from_scores(_session.y_val, scores, _session.threshold)
+    m["free"] = True
     return m
 
 
@@ -279,6 +319,8 @@ def submit_and_grade() -> dict[str, Any]:
 def sweep_thresholds(num_points: int = 101) -> dict[str, Any]:
     """Free helper to choose the best threshold on validation set maximizing F1."""
     assert _session is not None
+    if not _session.trained:
+        _auto_train()
     scores = forward_scores(_session.w, _session.b, _session.X_val)
     # Scan thresholds in [0,1]
     best_th = _session.threshold
@@ -292,6 +334,6 @@ def sweep_thresholds(num_points: int = 101) -> dict[str, Any]:
             best_th = th
             best = m
     _session.threshold = float(best_th)
-    return {"best_threshold": float(best_th), "val_metrics": best, "steps_used": _session.steps_used}
+    return {"best_threshold": float(best_th), "val_metrics": best, "free": True}
 
 

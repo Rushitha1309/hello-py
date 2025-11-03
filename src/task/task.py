@@ -124,7 +124,7 @@ def build_prompt(
         "Tools: imbalance_start(seed,max_steps,tau,minority_frac,source[,sample_n]), smote(ratio,k[,seed]), set_class_weights(beta), use_focal(alpha,gamma), "
         "train(epochs,lr), set_threshold(threshold), eval_on_val(), sweep_thresholds([num_points]), submit_answer(...).\n"
         f"Rules: (1) {src_line} (2) Only eval_on_val reveals metrics; TEST labels are hidden until submit. "
-        "(3) Actions that count toward the budget: smote, set_class_weights, use_focal, train, set_threshold. eval_on_val and sweep_thresholds are free. "
+        "(3) Actions that count toward the budget: smote, set_class_weights, use_focal, set_threshold. train, eval_on_val and sweep_thresholds are free. "
         f"(4) Pass if TEST F1 >= tau ({tau}) and you stay within the action budget. "
         "(5) You must train at least once before submitting. After training, run sweep_thresholds and then submit_answer('submit')."
     )
