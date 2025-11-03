@@ -19,7 +19,7 @@ The primary objective is to **maximize F1 score on a concealed test set**, all w
 - **[Kaggle Credit Card Fraud](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud/data) dataset** (`creditcardfraud`): A popular real-world dataset containing anonymized credit card transactions labeled as fraudulent or legitimate. It is extremely imbalanced, with fraudulent cases making up only a tiny fraction of the data. The project loads this dataset via `kagglehub`, and supports optional subsampling to speed up experiments.
 
 > [!NOTE]
-> The minimum F1 score set to achieve is 0.75 for the Kaggle imbalanced dataset.
+> The minimum F1 score set to achieve is 0.75 for the above Kaggle imbalanced dataset.
 
 ### 1.3 Approach
 The agent plans over multiple conversation turns, choosing from paid and free tools to maximize F1 under a budget. Core loop:
@@ -70,14 +70,15 @@ uv run main.py --runs 3 --sequential --conv-steps 3 --source synthetic --minorit
 ## 3. Implementation
 
 ### 3.1 Example Input/Output
-Command:
+**Command:**
 ```bash
-uv run main.py --runs 5 --conv-steps 5 \
-  --source kaggle --sample-n 50000 --max-steps 4 --tau 0.75 --model claude-haiku-4-5-20251001
+uv run main.py --runs 5 --conv-steps 3 \           
+  --source kaggle --sample-n 50000 --max-steps 3 --tau 0.75 --model claude-haiku-4-5-20251001
 ```
+See the [Parameters](#32-parameters) section below for detailed explanations of all command-line flags.
 
-Terminal output (now only final results):
-```text
+**Terminal output**:
+```python
 ============================================================
 Final Results:
   Passed: 1/5
@@ -90,8 +91,8 @@ Logs saved to: logs/run_YYYYMMDD_HHMMSS.log
 All detailed verbose logs (assistant messages, tool inputs/outputs, auto-submission, per-run summaries) are written to the [logs](logs/) folder.
 
 ### 3.1.1 Context and Memory
-- Per-turn (within a run): The task session persists; model parameters, thresholds, and counters carry over. After each turn the runner injects a budget reminder (via `get_budget`) like: “You may use up to <max_steps> paid actions; remaining: <remaining> (steps_used=<n>). Free tools: train, eval_on_val, sweep_thresholds.”
-- Cross-run: Runs execute sequentially when multiple runs are requested so the next prompt can include a brief history of previously tried paid-action sets. This nudges exploration without sharing hidden state. Each run still starts with a fresh task session.
+- **Per-turn (within a run)**: The task session persists; model parameters, thresholds, and counters carry over. After each turn the runner injects a budget reminder (via `get_budget`) like: “You may use up to <max_steps> paid actions; remaining: <remaining> (steps_used=<n>). Free tools: train, eval_on_val, sweep_thresholds.”
+- **Cross-run**: Runs execute sequentially when multiple runs are requested so the next prompt can include a brief history of previously tried paid-action sets. This nudges exploration without sharing hidden state. Each run still starts with a fresh task session.
 
 ### 3.1.2 The Prompt
 - Where it’s defined: `src/task/task.py::build_prompt` constructs the user prompt from CLI flags (`--source`, `--sample-n`, `--minority-frac`, `--max-steps`, `--tau`, `--seed`).
@@ -133,7 +134,28 @@ Notes:
 - SMOTE ratio edge cases: Invalid ratios are rejected and no-oped safely.
 
 ## 4. Results
-The task targets a 10–40% pass rate to balance difficulty and learning signal. Typical runs on Kaggle subsamples (e.g., `--sample-n 50k`, `--max-steps 4`, `--tau 0.75`) produce a mix of fails and occasional passes, with per-run test F1 and actions reported, and a final aggregated pass rate.
+- The task is designed to yield a 10–40% pass rate, providing both challenge and meaningful feedback for learning. When running with Kaggle subsamples (e.g., `--sample-n 50000`, `--max-steps 4`, `--tau 0.75`), we can expect most runs to fall short of the target, but a minority will succeed. 
+- After each run, the logs record the achieved test F1 score and the actions taken. At the end, the overall pass rate (proportion of runs exceeding the F1 threshold within the budget) summarizes performance. 
+- This variability helps drive exploration and improvement by the agent. 
+
+**Example**
+
+With the following command, a minimum of 20% pass rate is expected: 
+```bash
+uv run main.py --runs 10 --conv-steps 3 \           
+  --source kaggle --sample-n 50000 --max-steps 3 --tau 0.75 --model claude-haiku-4-5-20251001
+```
+
+**Result**
+```python
+============================================================
+Final Results:
+  Passed: 2/10
+  Failed: 8/10
+  Pass Rate: 20.0%
+============================================================
+Logs saved to: logs/run_20251103_093910.log
+```
 
 ## 5. Scope
 This task is intended for training and evaluating LLM planners on imbalanced classification. Multiple solution paths are valid (SMOTE-first vs. class weighting-first, focal toggles, threshold sweeps). The grader checks only final TEST F1 and budget compliance, allowing exploration.
