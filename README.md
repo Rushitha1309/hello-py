@@ -1,15 +1,44 @@
 ## 1. Introduction
 
 ### 1.1 About
-This project implements an RL-style task for LLMs to handle extreme class imbalance. The agent is given a toolset (SMOTE, class weights, focal loss, thresholding, training, validation, and submission) and must improve F1 on a hidden test set under a step budget. It targets a 10–40% pass rate as per task design guidance.
+This project implements an RL-style task for LLMs to handle **extreme class imbalance**. The LLM agent is provided a suite of tools, including: 
+- SMOTE
+- class weighting
+- focal loss
+- tau thresholding (for minimum passing Test F1)
+- training
+- validation
+- submission
+
+The primary objective is to **maximize F1 score on a concealed test set**, all while operating under a strict step (action) budget. By design, the task aims for a 10–40% model pass rate, consistent with task evaluation guidelines.
 
 ### 1.2 Data
-- Synthetic Gaussian blobs with configurable minority fraction.
-- [Kaggle Credit Card Fraud](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud/data) dataset (`creditcardfraud`) via `kagglehub` with optional subsampling for speed.
+- **Synthetic Gaussian blobs**: Artificially generated datasets where two classes are drawn from Gaussian distributions. The minority fraction (class imbalance) is configurable, making this dataset useful for controlled experimentation and benchmarking strategies for extreme imbalance.
+- **[Kaggle Credit Card Fraud](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud/data) dataset** (`creditcardfraud`): A popular real-world dataset containing anonymized credit card transactions labeled as fraudulent or legitimate. It is extremely imbalanced, with fraudulent cases making up only a tiny fraction of the data. The project loads this dataset via `kagglehub`, and supports optional subsampling to speed up experiments.
+
+> [!NOTE]
+> The minimum F1 score set to achieve is 0.75 for the Kaggle imbalanced dataset.
 
 ### 1.3 Approach
-The agent interacts in turns, selecting tools to modify data/training, with free auto-training after paid actions. Final grading uses test F1 vs. a threshold `tau`.
+The agent plans over multiple conversation turns, choosing from paid and free tools to maximize F1 under a budget. Core loop:
 
+- **Initialize**: Call `imbalance_start(...)` with data source and budget (`--source`, `--sample-n`/`--minority-frac`, `--max-steps`, `--tau`, `--seed`). Data is split into train/val/test; only validation metrics are visible during planning.
+- **Paid tools (consume budget)**:
+  - `smote(ratio,k[,seed])`: synthesize minority examples.
+  - `set_class_weights(beta)`: rebalance CE loss by effective number of samples.
+  - `use_focal(alpha,gamma)`: switch to focal loss for hard examples.
+  - `set_threshold(threshold)`: set decision threshold (often after sweeping).
+- **Free tools (no budget cost)**:
+  - `train(epochs,lr)`: explicit training; also triggered automatically after each paid action.
+  - `eval_on_val()`: see current precision/recall/F1 on validation.
+  - `sweep_thresholds([num_points])`: scan thresholds on validation; updates best threshold in-session.
+  - `submit_answer(...)`: triggers grading on the hidden test set.
+- **Auto-training**: After every effectful paid action we retrain for a few epochs (free) so evaluations reflect the latest configuration.
+- **Budget reminders**: After each turn the runner injects a `get_budget` summary so the agent knows remaining paid actions and can plan the next steps.
+- **Grading**: When the agent submits (or the runner auto-submits), we compute TEST F1 and compare to `tau`. The grader only checks the final outcome and that paid actions used ≤ `max_steps`.
+- **Exploration**: Across sequential runs, we append a short history of previously tried paid-action sets to the next prompt to discourage repeating the same strategy while keeping runs independent.
+
+**Flow**
 ```
 User Prompt → imbalance_start → [Paid tools]* → (free) train/eval → sweep_thresholds (free) → set_threshold → submit_answer → Grader
 ```
@@ -33,7 +62,7 @@ export ANTHROPIC_API_KEY=your_api_key_here
 
 3) Run a quick smoke test (synthetic):
 ```bash
-uv run main.py --runs 3 --sequential --conv-steps 8 --source synthetic --minority-frac 0.03 --max-steps 4 --tau 0.7 --model claude-haiku-4-5-20251001
+uv run main.py --runs 3 --sequential --conv-steps 3 --source synthetic --minority-frac 0.2 --max-steps 4 --tau 0.7 --model claude-haiku-4-5-20251001
 ```
 
 ## 3. Implementation
@@ -82,7 +111,7 @@ All detailed verbose logs (assistant messages, tool inputs/outputs, auto-submiss
 | `--sample-n` | Kaggle subsample size (for speed) | `None` |
 | `--minority-frac` | Synthetic minority class fraction (only used with `synthetic` data) | `0.03` |
 | `--max-steps` | Paid action budget available to agent | `5` |
-| `--tau` | Passing threshold on TEST F1 | `0.3` |
+| `--tau` | Minimum Test F1 score to pass | `0.3` |
 | `--seed` | Seed used in prompt; diversified per run as `seed+i` | `42` |
 | `--sequential` | Run trials sequentially for clean logs | off |
 | `--conv-steps` | Max conversation turns (assistant-tool messages) | `10` |
