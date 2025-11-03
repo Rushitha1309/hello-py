@@ -5,9 +5,9 @@ This project implements an RL-style task for LLMs to handle extreme class imbala
 
 ### 1.2 Data
 - Synthetic Gaussian blobs with configurable minority fraction.
-- Kaggle Credit Card Fraud dataset (`creditcardfraud`) via `kagglehub` with optional subsampling for speed.
+- [Kaggle Credit Card Fraud](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud/data) dataset (`creditcardfraud`) via `kagglehub` with optional subsampling for speed.
 
-### 1.3 Approach (with an image)
+### 1.3 Approach
 The agent interacts in turns, selecting tools to modify data/training, with free auto-training after paid actions. Final grading uses test F1 vs. a threshold `tau`.
 
 ```
@@ -41,8 +41,8 @@ uv run main.py --runs 3 --sequential --conv-steps 8 --source synthetic --minorit
 ### 3.1 Example Input/Output
 Command:
 ```bash
-uv run main.py --runs 5 --sequential --conv-steps 10 \
-  --source kaggle --sample-n 50000 --max-steps 4 --tau 0.75
+uv run main.py --runs 5 --conv-steps 5 \
+  --source kaggle --sample-n 50000 --max-steps 4 --tau 0.75 --model claude-haiku-4-5-20251001
 ```
 
 Terminal output (now only final results):
@@ -80,7 +80,7 @@ All detailed verbose logs (assistant messages, tool inputs/outputs, auto-submiss
 | `--model` | Anthropic model ID | `claude-haiku-4-5-20251001` |
 | `--source` | Data source: `synthetic` or `kaggle` | `synthetic` |
 | `--sample-n` | Kaggle subsample size (for speed) | `None` |
-| `--minority-frac` | Synthetic minority class fraction | `0.03` |
+| `--minority-frac` | Synthetic minority class fraction (only used with `synthetic` data) | `0.03` |
 | `--max-steps` | Paid action budget available to agent | `5` |
 | `--tau` | Passing threshold on TEST F1 | `0.3` |
 | `--seed` | Seed used in prompt; diversified per run as `seed+i` | `42` |
