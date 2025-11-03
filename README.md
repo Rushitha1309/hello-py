@@ -1,7 +1,9 @@
+# RL Task: Evaluating LLM Strategies under Extreme Class Imbalance
+
 ## 1. Introduction
 
 ### 1.1 About
-This project implements an RL-style task for LLMs to handle **extreme class imbalance**. The LLM agent is provided a suite of tools, including: 
+An RL-style task designed for LLMs to tackle **extreme class imbalance**, equipping the agent with a suite of tools, including: 
 - SMOTE
 - class weighting
 - focal loss
