@@ -98,6 +98,7 @@ class Session:
     w: np.ndarray
     b: float
     trained: bool = False
+    actions_used: list[str] | None = None
 
 
 _session: Session | None = None
@@ -147,6 +148,7 @@ def imbalance_start(
         y_test=y_test,
         w=w,
         b=0.0,
+        actions_used=[],
     )
     scores = forward_scores(w, 0.0, X_val)
     m = metrics_from_scores(y_val, scores, _session.threshold)
@@ -182,6 +184,13 @@ def _auto_train(epochs: int = 10, lr: float = 0.01) -> dict[str, Any]:
     return {"val_f1": m["f1"]}
 
 
+def reset_session() -> dict[str, Any]:
+    """Reset global session to ensure fresh state per trial."""
+    global _session
+    _session = None
+    return {"reset": True}
+
+
 def smote(ratio: float = 0.2, k: int = 5, seed: int | None = None) -> dict[str, Any]:
     assert _session is not None, "Call imbalance_start first"
     rng = _session.rng if seed is None else np.random.default_rng(int(seed))
@@ -214,6 +223,11 @@ def smote(ratio: float = 0.2, k: int = 5, seed: int | None = None) -> dict[str, 
     # Now consume a step since we will actually generate points
     if not _consume_step():
         return {"error": "step_budget_exceeded"}
+    # Record paid action
+    try:
+        _session.actions_used.append(f"smote(ratio={ratio:.2f},k={int(k)})")  # type: ignore[attr-defined]
+    except Exception:
+        pass
     from numpy.linalg import norm
     neighbor_k = min(k, max(1, n_min - 1))
     synth = []
@@ -242,21 +256,36 @@ def smote(ratio: float = 0.2, k: int = 5, seed: int | None = None) -> dict[str, 
 
 def set_class_weights(beta: float = 0.999) -> dict[str, Any]:
     assert _session is not None
+    # Precompute and no-op if unchanged
+    new_w = effective_class_weights(_session.y_train, beta)
+    if _session.class_weights is not None and np.allclose(new_w, _session.class_weights, rtol=1e-6, atol=1e-6) and _session.loss_type == "ce":
+        return {"noop": True, "free": True, "class_weights": _session.class_weights.tolist()}
     if not _consume_step():
         return {"error": "step_budget_exceeded"}
-    _session.class_weights = effective_class_weights(_session.y_train, beta)
+    _session.class_weights = new_w
     _session.loss_type = "ce"
+    try:
+        _session.actions_used.append(f"set_class_weights(beta={beta})")  # type: ignore[attr-defined]
+    except Exception:
+        pass
     auto = _auto_train()
     return {"class_weights": _session.class_weights.tolist(), "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
 def use_focal(alpha: float = 0.25, gamma: float = 2.0) -> dict[str, Any]:
     assert _session is not None
+    # No-op if identical focal settings already active
+    if _session.loss_type == "focal" and np.isclose(_session.focal_alpha, float(alpha)) and np.isclose(_session.focal_gamma, float(gamma)):
+        return {"noop": True, "free": True, "loss_type": _session.loss_type, "alpha": _session.focal_alpha, "gamma": _session.focal_gamma}
     if not _consume_step():
         return {"error": "step_budget_exceeded"}
     _session.loss_type = "focal"
     _session.focal_alpha = float(alpha)
     _session.focal_gamma = float(gamma)
+    try:
+        _session.actions_used.append(f"use_focal(alpha={alpha},gamma={gamma})")  # type: ignore[attr-defined]
+    except Exception:
+        pass
     auto = _auto_train()
     return {"loss_type": _session.loss_type, "alpha": alpha, "gamma": gamma, "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
@@ -284,13 +313,20 @@ def train(epochs: int = 50, lr: float = 0.1) -> dict[str, Any]:
 
 def set_threshold(threshold: float) -> dict[str, Any]:
     assert _session is not None
+    new_th = float(threshold)
+    if np.isclose(new_th, _session.threshold):
+        return {"noop": True, "free": True, "threshold": _session.threshold}
     if not _consume_step():
         return {"error": "step_budget_exceeded"}
-    _session.threshold = float(threshold)
+    _session.threshold = new_th
     # Train before evaluating threshold impact to ensure up-to-date model
     auto = _auto_train()
     scores = forward_scores(_session.w, _session.b, _session.X_val)
     m = metrics_from_scores(_session.y_val, scores, _session.threshold)
+    try:
+        _session.actions_used.append(f"set_threshold(th={threshold})")  # type: ignore[attr-defined]
+    except Exception:
+        pass
     return {"val_metrics": m, "threshold": _session.threshold, "steps_used": _session.steps_used, "budget_remaining": int(_session.max_steps - _session.steps_used), "auto_trained": True, "val_f1": auto["val_f1"]}
 
 
@@ -313,7 +349,13 @@ def submit_and_grade() -> dict[str, Any]:
         return {"pass": False, "test_f1": 0.0, "reason": "not_trained"}
     scores = forward_scores(_session.w, _session.b, _session.X_test)
     m = metrics_from_scores(_session.y_test, scores, _session.threshold)
-    return {"pass": m["f1"] >= _session.tau, "test_f1": float(m["f1"]) }
+    return {
+        "pass": m["f1"] >= _session.tau,
+        "test_f1": float(m["f1"]),
+        "steps_used": int(_session.steps_used),
+        "max_steps": int(_session.max_steps),
+        "actions_used": list(_session.actions_used or []),
+    }
 
 
 def sweep_thresholds(num_points: int = 101) -> dict[str, Any]:
@@ -335,5 +377,17 @@ def sweep_thresholds(num_points: int = 101) -> dict[str, Any]:
             best = m
     _session.threshold = float(best_th)
     return {"best_threshold": float(best_th), "val_metrics": best, "free": True}
+
+
+def get_budget() -> dict[str, Any]:
+    """Free: report current budget usage and remaining paid actions."""
+    if _session is None:
+        return {"free": True, "not_initialized": True, "steps_used": 0, "max_steps": None, "remaining": None}
+    return {
+        "free": True,
+        "steps_used": int(_session.steps_used),
+        "max_steps": int(_session.max_steps),
+        "remaining": int(max(0, _session.max_steps - _session.steps_used)),
+    }
 
 

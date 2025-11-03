@@ -14,6 +14,7 @@ from src.tools.tools import (
     eval_on_val,
     submit_and_grade,
     sweep_thresholds,
+    get_budget,
 )
 
 
@@ -79,6 +80,11 @@ def build_tools() -> tuple[list[ToolUnionParam], dict[str, Callable[..., Any]]]:
             "input_schema": {"type": "object", "properties": {"num_points": {"type": "integer"}}},
         },
         {
+            "name": "get_budget",
+            "description": "Free: report steps_used, max_steps, and remaining paid actions.",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
             "name": "submit_answer",
             "description": "Submit the final solution for grading (returns pass/fail).",
             "input_schema": {"type": "object", "properties": {"answer": {"description": "Ignored; grader computes pass/fail"}}, "required": ["answer"]},
@@ -94,6 +100,7 @@ def build_tools() -> tuple[list[ToolUnionParam], dict[str, Callable[..., Any]]]:
         "set_threshold": set_threshold,
         "eval_on_val": eval_on_val,
         "sweep_thresholds": sweep_thresholds,
+        "get_budget": lambda: get_budget(),
         "submit_answer": lambda answer: {"answer": submit_and_grade()["pass"], "submitted": True},
     }
 
@@ -124,9 +131,10 @@ def build_prompt(
         "Tools: imbalance_start(seed,max_steps,tau,minority_frac,source[,sample_n]), smote(ratio,k[,seed]), set_class_weights(beta), use_focal(alpha,gamma), "
         "train(epochs,lr), set_threshold(threshold), eval_on_val(), sweep_thresholds([num_points]), submit_answer(...).\n"
         f"Rules: (1) {src_line} (2) Only eval_on_val reveals metrics; TEST labels are hidden until submit. "
-        "(3) Actions that count toward the budget: smote, set_class_weights, use_focal, set_threshold. train, eval_on_val and sweep_thresholds are free. "
-        f"(4) Pass if TEST F1 >= tau ({tau}) and you stay within the action budget. "
-        "(5) You must train at least once before submitting. After training, run sweep_thresholds and then submit_answer('submit')."
+        "(3) Paid actions: smote, set_class_weights, use_focal, set_threshold. Free: train, eval_on_val, sweep_thresholds. "
+        "(4) You may choose any mix of paid tools until the budget is exhausted (no locking of tool TYPES). You'll be reminded each turn how many paid actions remain via get_budget. "
+        f"(5) Pass if TEST F1 >= tau ({tau}) and you stay within the action budget. "
+        "(6) You must train at least once before submitting. Prefer sweep_thresholds then submit_answer('submit')."
     )
 
 

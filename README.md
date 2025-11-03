@@ -1,94 +1,111 @@
-hello-py
-===
+## 1. Introduction
 
-Setup instructions:
+### 1.1 About
+This project implements an RL-style task for LLMs to handle extreme class imbalance. The agent is given a toolset (SMOTE, class weights, focal loss, thresholding, training, validation, and submission) and must improve F1 on a hidden test set under a step budget. It targets a 10–40% pass rate as per task design guidance.
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/preferencemodel/hello-py.git
-   ```
+### 1.2 Data
+- Synthetic Gaussian blobs with configurable minority fraction.
+- Kaggle Credit Card Fraud dataset (`creditcardfraud`) via `kagglehub` with optional subsampling for speed.
 
-2. Navigate to the project directory:
-   ```
-   cd hello-py
-   ```
-
-3. Set up `ANTHROPIC_API_KEY` environment variable:
-   ```
-   export ANTHROPIC_API_KEY=your_api_key_here
-   ```
-
-4. Run the agent:
-   ```
-   uv run main.py
-   ```
-
-## Execution Modes
-
-The test suite supports both concurrent and sequential execution. 
-
-To change modes, edit the `concurrent` parameter at the bottom of `main.py`:
-
-```python
-asyncio.run(main(concurrent=True))
-asyncio.run(main(concurrent=False))
-```
-
-When running concurrently, results print as they complete (not in run order) for faster overall execution.
-
-## Imbalance RL-style Task (separate runner)
-
-To run the imbalance-handling prototype without modifying `main.py`:
+### 1.3 Approach (with an image)
+The agent interacts in turns, selecting tools to modify data/training, with free auto-training after paid actions. Final grading uses test F1 vs. a threshold `tau`.
 
 ```
-uv run src/runner/runner.py
+User Prompt → imbalance_start → [Paid tools]* → (free) train/eval → sweep_thresholds (free) → set_threshold → submit_answer → Grader
 ```
 
-This launches an agent that must improve minority F1 on a hidden test set within an action budget using deterministic tools (SMOTE, class weights, focal loss, training, thresholding, validation eval, and final submission for grading).
+### 1.4 Why use focal loss and SMOTE
+- SMOTE synthesizes minority examples to mitigate skew and improve recall.
+- Focal loss down-weights easy negatives and focuses learning on hard positives, which is critical under extreme imbalance.
+Used together (plus threshold tuning), they often yield better F1 than class weighting alone.
 
-### Using the Kaggle Credit Card Fraud dataset
+## 2. Setup
 
-Dependencies: `pandas`, `kagglehub` (already in pyproject).
-
-- Optional: set `CREDITCARD_DATA_DIR` to a folder containing `creditcard.csv` to skip download.
-- Otherwise, the agent can call `imbalance_start(..., source='kaggle', sample_n=20000)` to download via KaggleHub and subsample for speed.
-
-Note: Download requires network access and may need Kaggle auth depending on your environment.
-
-### Verbose logging and CLI flags
-
-- Show detailed tool inputs/outputs and assistant messages:
-```
-uv run src/runner/runner.py --verbose
+1) Install deps (uses `uv`):
+```bash
+uv run --version  # verify uv is installed
 ```
 
-- Change number of trials, model, and conversation turns:
-```
-uv run src/runner/runner.py --runs 20 --model claude-haiku-4-5-20251001 --conv-steps 12
-```
-
-- Select data source and parameters:
-```
-# Synthetic with custom imbalance
-uv run src/runner/runner.py --source synthetic --minority-frac 0.05 --max-steps 7 --tau 0.4 --conv-steps 12 --verbose
-
-# Kaggle with subsampling for speed
-uv run src/runner/runner.py --source kaggle --sample-n 20000 --max-steps 7 --tau 0.4 --conv-steps 12 --verbose
+2) Set Anthropic API key:
+```bash
+export ANTHROPIC_API_KEY=your_api_key_here
 ```
 
-## Imbalance RL-style Task
+3) Run a quick smoke test (synthetic):
+```bash
+uv run main.py --runs 3 --sequential --conv-steps 8 --source synthetic --minority-frac 0.03 --max-steps 4 --tau 0.7
+```
 
-The default run now executes an imbalance-handling task where the agent must improve minority F1 on a hidden test set by invoking deterministic tools within an action budget.
+## 3. Implementation
 
-Tools exposed to the agent:
+### 3.1 Example Input/Output
+Command:
+```bash
+uv run main.py --runs 5 --sequential --conv-steps 10 \
+  --source kaggle --sample-n 50000 --max-steps 4 --tau 0.75
+```
 
-- imbalance_start(seed, max_steps, tau, minority_frac)
-- smote(ratio, k, [seed])
-- set_class_weights(beta)
-- use_focal(alpha, gamma)
-- train(epochs, lr)
-- set_threshold(threshold)
-- eval_on_val()
-- submit_answer(any)  ← triggers grading; returns pass/fail
+Terminal output (now only final results):
+```text
+============================================================
+Final Results:
+  Passed: 1/5
+  Failed: 4/5
+  Pass Rate: 20.0%
+============================================================
+Logs saved to: logs/run_YYYYMMDD_HHMMSS.log
+```
 
-Pass condition: TEST F1 ≥ tau and actions used ≤ max_steps.
+All detailed verbose logs (assistant messages, tool inputs/outputs, auto-submission, per-run summaries) are written to the [logs](logs/) folder.
+
+### 3.1.1 Context and Memory
+- Per-turn (within a run): The task session persists; model parameters, thresholds, and counters carry over. After each turn the runner injects a budget reminder (via `get_budget`) like: “You may use up to <max_steps> paid actions; remaining: <remaining> (steps_used=<n>). Free tools: train, eval_on_val, sweep_thresholds.”
+- Cross-run: Runs execute sequentially when multiple runs are requested so the next prompt can include a brief history of previously tried paid-action sets. This nudges exploration without sharing hidden state. Each run still starts with a fresh task session.
+
+### 3.1.2 The Prompt
+- Where it’s defined: `src/task/task.py::build_prompt` constructs the user prompt from CLI flags (`--source`, `--sample-n`, `--minority-frac`, `--max-steps`, `--tau`, `--seed`).
+- What it contains:
+  - Problem statement and success criteria (maximize TEST F1 ≥ `tau` within `max_steps` paid actions).
+  - Tool catalog and rules, clearly distinguishing paid vs free tools.
+  - Data-source clause (synthetic with `minority_frac` or Kaggle with `sample_n`).
+  - Nudge to “train at least once”, then “sweep_thresholds” and submit.
+- How it’s used: The prompt is sent alongside the tool schemas to the model. The runner may append a short history line between runs and a budget reminder between turns. Grading occurs only when the agent calls `submit_answer` (or the runner auto-submits), comparing TEST F1 vs `tau` and checking budget.
+
+### 3.2 Parameters
+
+| Flag | Description | Default |
+|---|---|---|
+| `--runs` | Number of trials to run | `10` |
+| `--verbose` | Print detailed tool I/O and assistant messages | off |
+| `--model` | Anthropic model ID | `claude-haiku-4-5-20251001` |
+| `--source` | Data source: `synthetic` or `kaggle` | `synthetic` |
+| `--sample-n` | Kaggle subsample size (for speed) | `None` |
+| `--minority-frac` | Synthetic minority class fraction | `0.03` |
+| `--max-steps` | Paid action budget available to agent | `5` |
+| `--tau` | Passing threshold on TEST F1 | `0.3` |
+| `--seed` | Seed used in prompt; diversified per run as `seed+i` | `42` |
+| `--sequential` | Run trials sequentially for clean logs | off |
+| `--conv-steps` | Max conversation turns (assistant-tool messages) | `10` |
+
+Notes:
+- Free tools do not consume budget: `train`, `eval_on_val`, `sweep_thresholds`.
+- Paid tools consume budget: `smote`, `set_class_weights`, `use_focal`, `set_threshold`.
+- `submit_answer` is always available; the runner auto-submits when needed.
+- Terminal shows only “Final Results”; see the generated log file in `logs/` for complete per-run verbose output.
+- Budget reminders: The runner appends a `get_budget` summary after each assistant/tool turn so the agent knows remaining paid actions.
+
+### 3.3 Known errors
+- `step_budget_exceeded`: Too many paid actions. Solution: raise `--max-steps`, avoid repeating identical paid actions (free no-op checks are implemented), or submit earlier.
+- `anthropic.NotFoundError` on model: Use a model ID your key supports (e.g., `claude-haiku-4-5-20251001`).
+- Rate limiting: Retry later; the runner ends gracefully when API errors occur.
+- Short conversations ending without submit: The runner auto-submits at end or after `sweep_thresholds`.
+- SMOTE ratio edge cases: Invalid ratios are rejected and no-oped safely.
+
+## 4. Results
+The task targets a 10–40% pass rate to balance difficulty and learning signal. Typical runs on Kaggle subsamples (e.g., `--sample-n 50k`, `--max-steps 4`, `--tau 0.75`) produce a mix of fails and occasional passes, with per-run test F1 and actions reported, and a final aggregated pass rate.
+
+## 5. Scope
+This task is intended for training and evaluating LLM planners on imbalanced classification. Multiple solution paths are valid (SMOTE-first vs. class weighting-first, focal toggles, threshold sweeps). The grader checks only final TEST F1 and budget compliance, allowing exploration.
+
+## 6. Conclusion
+This repository provides a concise RL-style environment where an agent learns to tackle class imbalance with practical tools (SMOTE, focal loss, thresholding). It is configurable via CLI, supports real-world data, and produces clear summaries suitable for RL training signals.
